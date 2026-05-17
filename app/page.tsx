@@ -14,7 +14,13 @@ type StoredMemory = {
 export default function Home() {
   const [memories, setMemories] = useState<StoredMemory[]>([]);
   const [memoriesLoading, setMemoriesLoading] = useState(false);
+  const [newIds, setNewIds] = useState<Set<string>>(new Set());
   const [input, setInput] = useState('');
+  // Track ids we've already seen so we only highlight true deltas — never on
+  // first load (where everything would qualify as "new").
+  const seenIdsRef = useRef<Set<string>>(new Set());
+  const isInitialLoadRef = useRef(true);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { messages, sendMessage, status } = useChat({
     onFinish: () => {
@@ -29,10 +35,24 @@ export default function Home() {
     try {
       const res = await fetch('/api/memories', { cache: 'no-store' });
       const data = await res.json();
-      const active = (data.memories ?? []).filter(
+      const active: StoredMemory[] = (data.memories ?? []).filter(
         (m: StoredMemory) => m.details?.status !== 'retracted',
       );
       setMemories(active);
+
+      const currentIds = new Set(active.map((m) => m.id));
+      if (!isInitialLoadRef.current) {
+        const justAdded = new Set(
+          [...currentIds].filter((id) => !seenIdsRef.current.has(id)),
+        );
+        if (justAdded.size > 0) {
+          setNewIds(justAdded);
+          if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+          highlightTimerRef.current = setTimeout(() => setNewIds(new Set()), 10_000);
+        }
+      }
+      seenIdsRef.current = currentIds;
+      isInitialLoadRef.current = false;
     } catch (err) {
       console.error('Failed to fetch memories:', err);
     } finally {
@@ -42,6 +62,9 @@ export default function Home() {
 
   useEffect(() => {
     refreshMemories();
+    return () => {
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    };
   }, [refreshMemories]);
 
   const onSubmit = (e: FormEvent<HTMLFormElement>) => {
@@ -55,6 +78,8 @@ export default function Home() {
   const onReset = async () => {
     if (!confirm('Wipe every memory for this demo user. Continue?')) return;
     await fetch('/api/memories', { method: 'DELETE' });
+    setNewIds(new Set());
+    seenIdsRef.current = new Set();
     refreshMemories();
   };
 
@@ -69,7 +94,12 @@ export default function Home() {
           setInput={setInput}
           onSubmit={onSubmit}
         />
-        <MemoryPane memories={memories} loading={memoriesLoading} onRefresh={refreshMemories} />
+        <MemoryPane
+          memories={memories}
+          loading={memoriesLoading}
+          onRefresh={refreshMemories}
+          newIds={newIds}
+        />
       </div>
     </main>
   );
@@ -203,15 +233,32 @@ function MemoryPane({
   memories,
   loading,
   onRefresh,
+  newIds,
 }: {
   memories: StoredMemory[];
   loading: boolean;
   onRefresh: () => void;
+  newIds: Set<string>;
 }) {
+  // Sort: new ones first (so they're easy to spot), then by created_at desc.
+  const sorted = [...memories].sort((a, b) => {
+    const aNew = newIds.has(a.id) ? 1 : 0;
+    const bNew = newIds.has(b.id) ? 1 : 0;
+    if (aNew !== bNew) return bNew - aNew;
+    return (b.created_at ?? '').localeCompare(a.created_at ?? '');
+  });
+
   return (
     <aside className="w-80 flex-shrink-0 overflow-y-auto border-l border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold">What I remember</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold">What I remember</h2>
+          {newIds.size > 0 && (
+            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+              +{newIds.size} new
+            </span>
+          )}
+        </div>
         <button
           onClick={onRefresh}
           className="text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
@@ -226,22 +273,35 @@ function MemoryPane({
         </p>
       ) : (
         <ul className="flex flex-col gap-2">
-          {memories.map((m) => (
-            <li
-              key={m.id}
-              className="rounded-md border border-zinc-200 bg-zinc-50 p-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
-            >
-              <div className="mb-1 flex items-center gap-2">
-                <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                  {m.type}
-                </span>
-                {m.details?.fact_type && (
-                  <span className="text-[10px] text-zinc-500">{m.details.fact_type}</span>
-                )}
-              </div>
-              <p className="text-zinc-700 dark:text-zinc-300">{m.text}</p>
-            </li>
-          ))}
+          {sorted.map((m) => {
+            const isNew = newIds.has(m.id);
+            return (
+              <li
+                key={m.id}
+                className={
+                  'rounded-md border p-2.5 text-xs transition-all duration-500 ' +
+                  (isNew
+                    ? 'border-emerald-300 bg-emerald-50 ring-1 ring-emerald-200 dark:border-emerald-700 dark:bg-emerald-950/40 dark:ring-emerald-800'
+                    : 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950')
+                }
+              >
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                    {m.type}
+                  </span>
+                  {m.details?.fact_type && (
+                    <span className="text-[10px] text-zinc-500">{m.details.fact_type}</span>
+                  )}
+                  {isNew && (
+                    <span className="ml-auto rounded bg-emerald-500 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+                      new
+                    </span>
+                  )}
+                </div>
+                <p className="text-zinc-700 dark:text-zinc-300">{m.text}</p>
+              </li>
+            );
+          })}
         </ul>
       )}
     </aside>
