@@ -29,16 +29,30 @@ npm run dev
 
 | File | Role |
 |---|---|
-| [`lib/memory.ts`](./lib/memory.ts) | Lazy-initialized `MemoryClient` (env-validated on first use). |
-| [`app/api/chat/route.ts`](./app/api/chat/route.ts) | POST handler: searches memory, calls `streamText`, ingests the turn in `onFinish` with `wait: true`. |
+| [`lib/memory.ts`](./lib/memory.ts) | Lazy-initialized `MemoryClient` (env-validated on first use). Used by the sidebar list / reset routes. |
+| [`app/api/chat/route.ts`](./app/api/chat/route.ts) | POST handler. Wraps the OpenAI model with `createXtraceMemory(...)` from [`@xtraceai/memory/ai-sdk`](https://www.npmjs.com/package/@xtraceai/memory) — search-before-call and ingest-after-call happen inside the wrapper. The route handler is just `streamText({ model, system, messages })`. |
 | [`app/api/memories/route.ts`](./app/api/memories/route.ts) | GET (sidebar list) + DELETE (reset). |
 | [`app/page.tsx`](./app/page.tsx) | Chat UI with `useChat`, memory sidebar that refreshes after each turn. |
 
-## Why `wait: true` on ingest
+## How memory is wired
 
-The Memory API is async by default — `POST /v1/memories` returns a job in `pending` / `running`, and extraction takes a few seconds in the background. For a demo, that's the wrong shape: the user finishes a turn, the next message they send should be able to retrieve what was just ingested.
+The Vercel AI SDK integration ships with `@xtraceai/memory` at the `/ai-sdk` subpath. One line replaces all the manual search/ingest plumbing:
 
-Passing `wait: true` makes the server hold the connection (up to 30s) and only return once the job is terminal. The cost is that the response stream stays open slightly longer at the end of each turn; the benefit is that the sidebar refresh on `onFinish` actually sees the new memories.
+```ts
+import { createXtraceMemory } from '@xtraceai/memory/ai-sdk';
+
+const xtrace = createXtraceMemory({ apiKey, orgId, user_id, conv_id });
+
+const result = streamText({
+  model: xtrace(openai('gpt-4o-mini')),   // memory-aware wrapper
+  messages,
+});
+```
+
+Behind the scenes, the wrapper:
+
+1. Before each LLM call: searches memory using the latest user message, prepends results as a system block.
+2. After each LLM call: ingests the (user, assistant) turn back via `client.memories.ingest({ ..., wait: true })`. `wait: true` keeps the new memory queryable on the next turn without a polling step.
 
 ## Deploy
 
@@ -49,7 +63,6 @@ Pushes to `main` auto-deploy via Vercel. Set the same three env vars in **Projec
 - `OPENAI_API_KEY`
 
 Optionally:
-- `XTRACE_BASE_URL` (defaults to `https://api.staging.xtrace.ai`)
 - `DEMO_USER_ID` / `DEMO_CONV_ID`
 
 ## What this demo deliberately doesn't have

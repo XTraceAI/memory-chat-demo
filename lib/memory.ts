@@ -2,8 +2,13 @@ import { MemoryClient } from '@xtraceai/memory';
 
 let _memory: MemoryClient | null = null;
 
-/** Lazily-instantiated memory client. Validates env vars on first call, not at import time
- *  (so `next build` doesn't need a real key). */
+/** Lazily-instantiated memory client. Validates env vars on first call, not
+ *  at import time (so `next build` doesn't need a real key).
+ *
+ *  Base URL: the SDK defaults to production. Set `XTRACE_BASE_URL` in the
+ *  environment to point at staging (or any other deployment) without
+ *  hardcoding a URL in source.
+ */
 export function getMemory(): MemoryClient {
   if (_memory) return _memory;
 
@@ -15,7 +20,7 @@ export function getMemory(): MemoryClient {
   _memory = new MemoryClient({
     apiKey,
     orgId,
-    baseUrl: process.env.XTRACE_BASE_URL ?? 'https://api.staging.xtrace.ai',
+    baseUrl: process.env.XTRACE_BASE_URL,   // undefined → SDK default (prod)
   });
   return _memory;
 }

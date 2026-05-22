@@ -12,7 +12,6 @@ export async function GET() {
       XTRACE_API_KEY: process.env.XTRACE_API_KEY ? `set (len=${process.env.XTRACE_API_KEY.length})` : 'MISSING',
       XTRACE_ORG_ID: process.env.XTRACE_ORG_ID ? `set (len=${process.env.XTRACE_ORG_ID.length})` : 'MISSING',
       OPENAI_API_KEY: process.env.OPENAI_API_KEY ? `set (len=${process.env.OPENAI_API_KEY.length})` : 'MISSING',
-      XTRACE_BASE_URL: process.env.XTRACE_BASE_URL ?? '(default: https://api.staging.xtrace.ai)',
       DEMO_USER_ID,
       DEMO_CONV_ID,
     },
