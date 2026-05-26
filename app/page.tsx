@@ -8,6 +8,7 @@ type StoredMemory = {
   type: 'fact' | 'artifact' | 'episode';
   text: string;
   created_at: string;
+  score?: number | null;
   details?: { status?: string; fact_type?: string } | null;
 };
 
@@ -16,43 +17,43 @@ export default function Home() {
   const [memoriesLoading, setMemoriesLoading] = useState(false);
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
   const [input, setInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   // Track ids we've already seen so we only highlight true deltas — never on
   // first load (where everything would qualify as "new").
   const seenIdsRef = useRef<Set<string>>(new Set());
   const isInitialLoadRef = useRef(true);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Keep latest debounced query reachable from the (stable) onFinish closure.
+  const queryRef = useRef('');
 
-  const { messages, sendMessage, status } = useChat({
-    onFinish: () => {
-      // Memory ingest runs server-side and is awaited before the stream closes;
-      // by the time we land here the new memories should be queryable.
-      refreshMemories();
-    },
-  });
-
-  const refreshMemories = useCallback(async () => {
+  const refreshMemories = useCallback(async (q: string = '') => {
     setMemoriesLoading(true);
     try {
-      const res = await fetch('/api/memories', { cache: 'no-store' });
+      const url = q ? `/api/memories?q=${encodeURIComponent(q)}` : '/api/memories';
+      const res = await fetch(url, { cache: 'no-store' });
       const data = await res.json();
       const active: StoredMemory[] = (data.memories ?? []).filter(
         (m: StoredMemory) => m.details?.status !== 'retracted',
       );
       setMemories(active);
 
-      const currentIds = new Set(active.map((m) => m.id));
-      if (!isInitialLoadRef.current) {
-        const justAdded = new Set(
-          [...currentIds].filter((id) => !seenIdsRef.current.has(id)),
-        );
-        if (justAdded.size > 0) {
-          setNewIds(justAdded);
-          if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
-          highlightTimerRef.current = setTimeout(() => setNewIds(new Set()), 10_000);
+      // Highlight "just added" only in list mode — meaningless during search.
+      if (!q) {
+        const currentIds = new Set(active.map((m) => m.id));
+        if (!isInitialLoadRef.current) {
+          const justAdded = new Set(
+            [...currentIds].filter((id) => !seenIdsRef.current.has(id)),
+          );
+          if (justAdded.size > 0) {
+            setNewIds(justAdded);
+            if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+            highlightTimerRef.current = setTimeout(() => setNewIds(new Set()), 10_000);
+          }
         }
+        seenIdsRef.current = currentIds;
+        isInitialLoadRef.current = false;
       }
-      seenIdsRef.current = currentIds;
-      isInitialLoadRef.current = false;
     } catch (err) {
       console.error('Failed to fetch memories:', err);
     } finally {
@@ -60,12 +61,35 @@ export default function Home() {
     }
   }, []);
 
+  const { messages, sendMessage, status } = useChat({
+    onFinish: () => {
+      // Memory ingest runs server-side and is awaited before the stream closes;
+      // by the time we land here the new memories should be queryable.
+      refreshMemories(queryRef.current);
+    },
+  });
+
+  // Debounce search input (300ms) so we don't fire on every keystroke.
   useEffect(() => {
-    refreshMemories();
+    const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  // Keep ref in sync so onFinish picks up the latest query.
+  useEffect(() => {
+    queryRef.current = debouncedQuery;
+  }, [debouncedQuery]);
+
+  // Refetch whenever the debounced query changes (covers initial load too).
+  useEffect(() => {
+    refreshMemories(debouncedQuery);
+  }, [debouncedQuery, refreshMemories]);
+
+  useEffect(() => {
     return () => {
       if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
     };
-  }, [refreshMemories]);
+  }, []);
 
   const onSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -80,7 +104,8 @@ export default function Home() {
     await fetch('/api/memories', { method: 'DELETE' });
     setNewIds(new Set());
     seenIdsRef.current = new Set();
-    refreshMemories();
+    setSearchQuery('');
+    refreshMemories('');
   };
 
   return (
@@ -97,8 +122,11 @@ export default function Home() {
         <MemoryPane
           memories={memories}
           loading={memoriesLoading}
-          onRefresh={refreshMemories}
+          onRefresh={() => refreshMemories(debouncedQuery)}
           newIds={newIds}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          isSearching={debouncedQuery.length > 0}
         />
       </div>
     </main>
@@ -234,76 +262,118 @@ function MemoryPane({
   loading,
   onRefresh,
   newIds,
+  searchQuery,
+  onSearchChange,
+  isSearching,
 }: {
   memories: StoredMemory[];
   loading: boolean;
   onRefresh: () => void;
   newIds: Set<string>;
+  searchQuery: string;
+  onSearchChange: (v: string) => void;
+  isSearching: boolean;
 }) {
-  // Sort: new ones first (so they're easy to spot), then by created_at desc.
-  const sorted = [...memories].sort((a, b) => {
-    const aNew = newIds.has(a.id) ? 1 : 0;
-    const bNew = newIds.has(b.id) ? 1 : 0;
-    if (aNew !== bNew) return bNew - aNew;
-    return (b.created_at ?? '').localeCompare(a.created_at ?? '');
-  });
+  // List mode: sort new items to the top, then by created_at desc.
+  // Search mode: backend returns results ranked by score; keep that order.
+  const sorted = isSearching
+    ? memories
+    : [...memories].sort((a, b) => {
+        const aNew = newIds.has(a.id) ? 1 : 0;
+        const bNew = newIds.has(b.id) ? 1 : 0;
+        if (aNew !== bNew) return bNew - aNew;
+        return (b.created_at ?? '').localeCompare(a.created_at ?? '');
+      });
 
   return (
-    <aside className="w-80 flex-shrink-0 overflow-y-auto border-l border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold">What I remember</h2>
-          {newIds.size > 0 && (
-            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
-              +{newIds.size} new
-            </span>
+    <aside className="flex w-80 flex-shrink-0 flex-col overflow-hidden border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="border-b border-zinc-200 p-4 dark:border-zinc-800">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold">
+              {isSearching ? 'Search results' : 'What I remember'}
+            </h2>
+            {!isSearching && newIds.size > 0 && (
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                +{newIds.size} new
+              </span>
+            )}
+          </div>
+          <button
+            onClick={onRefresh}
+            className="text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+            disabled={loading}
+          >
+            {loading ? '…' : 'refresh'}
+          </button>
+        </div>
+        <div className="relative">
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search memories…"
+            className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 pr-7 text-xs outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-800"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => onSearchChange('')}
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              ×
+            </button>
           )}
         </div>
-        <button
-          onClick={onRefresh}
-          className="text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
-          disabled={loading}
-        >
-          {loading ? '…' : 'refresh'}
-        </button>
       </div>
-      {memories.length === 0 ? (
-        <p className="text-xs text-zinc-500">
-          No memories yet. Send a message that includes a fact about yourself (your name, a preference, where you live) and watch this fill up.
-        </p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {sorted.map((m) => {
-            const isNew = newIds.has(m.id);
-            return (
-              <li
-                key={m.id}
-                className={
-                  'rounded-md border p-2.5 text-xs transition-all duration-500 ' +
-                  (isNew
-                    ? 'border-emerald-300 bg-emerald-50 ring-1 ring-emerald-200 dark:border-emerald-700 dark:bg-emerald-950/40 dark:ring-emerald-800'
-                    : 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950')
-                }
-              >
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                    {m.type}
-                  </span>
-                  {m.details?.fact_type && (
-                    <span className="text-[10px] text-zinc-500">{m.details.fact_type}</span>
-                  )}
-                  {isNew && (
-                    <span className="ml-auto rounded bg-emerald-500 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
-                      new
+
+      <div className="flex-1 overflow-y-auto p-4">
+        {memories.length === 0 ? (
+          <p className="text-xs text-zinc-500">
+            {isSearching
+              ? `No matches for "${searchQuery.trim()}". Try fewer or different words.`
+              : 'No memories yet. Send a message that includes a fact about yourself (your name, a preference, where you live) and watch this fill up.'}
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {sorted.map((m) => {
+              const isNew = !isSearching && newIds.has(m.id);
+              return (
+                <li
+                  key={m.id}
+                  className={
+                    'rounded-md border p-2.5 text-xs transition-all duration-500 ' +
+                    (isNew
+                      ? 'border-emerald-300 bg-emerald-50 ring-1 ring-emerald-200 dark:border-emerald-700 dark:bg-emerald-950/40 dark:ring-emerald-800'
+                      : 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950')
+                  }
+                >
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                      {m.type}
                     </span>
-                  )}
-                </div>
-                <p className="text-zinc-700 dark:text-zinc-300">{m.text}</p>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+                    {m.details?.fact_type && (
+                      <span className="text-[10px] text-zinc-500">{m.details.fact_type}</span>
+                    )}
+                    {isSearching && typeof m.score === 'number' && (
+                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                        {m.score.toFixed(2)}
+                      </span>
+                    )}
+                    {isNew && (
+                      <span className="ml-auto rounded bg-emerald-500 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+                        new
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-zinc-700 dark:text-zinc-300">{m.text}</p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     </aside>
   );
 }

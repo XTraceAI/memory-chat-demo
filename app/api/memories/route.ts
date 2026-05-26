@@ -4,15 +4,40 @@ import type { Memory } from '@xtraceai/memory';
 export const dynamic = 'force-dynamic';
 
 /**
- * List memories visible for the demo session.
+ * List or search memories for the demo session.
  *
- * Two passes: facts are user-scoped (user_id), episodes are conv-scoped
- * (conv_id) — listing by user_id alone misses the episodes, so we run
- * both and dedupe by id.
+ * - `?q=<text>` → vector + filter search (user-scoped), ranked by similarity.
+ * - no `q`     → list mode. Two passes (user-scoped + conv-scoped) deduped
+ *                by id, because episodes are conv-scoped and would be
+ *                missed by a user_id-only listing.
  */
-export async function GET() {
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const q = searchParams.get('q')?.trim();
+
   try {
     const client = getMemory().memories;
+
+    if (q) {
+      const results = await client.search({
+        query: q,
+        filters: { user_id: DEMO_USER_ID },
+        limit: 25,
+      });
+      return Response.json({
+        memories: results.data.map((m) => ({
+          id: m.id,
+          type: m.type,
+          text: m.text,
+          score: (m as Memory & { score?: number | null }).score ?? null,
+          created_at: m.created_at,
+          details: m.details,
+        })),
+        mode: 'search',
+        query: q,
+      });
+    }
+
     const [byUser, byConv] = await Promise.all([
       client.listPage({ user_id: DEMO_USER_ID, limit: 50 }),
       client.listPage({ conv_id: DEMO_CONV_ID, limit: 50 }),
@@ -32,9 +57,10 @@ export async function GET() {
         created_at: m.created_at,
         details: m.details,
       })),
+      mode: 'list',
     });
   } catch (err) {
-    console.error('[memories] list failed:', err);
+    console.error('[memories] list/search failed:', err);
     return Response.json({ error: String(err) }, { status: 500 });
   }
 }
