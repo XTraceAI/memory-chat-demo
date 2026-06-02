@@ -70,15 +70,20 @@ export async function POST(req: Request) {
       // (app_id) is never written from chat.
       if (!query || !text) return;
       await getMemory()
-        .memories.ingest({
-          messages: [
-            { role: 'user', content: query },
-            { role: 'assistant', content: text },
-          ],
-          user_id: persona,
-          conv_id: CONV_ID,
-          group_ids: [trip],
-        })
+        .memories.ingest(
+          {
+            messages: [
+              { role: 'user', content: query },
+              { role: 'assistant', content: text },
+            ],
+            user_id: persona,
+            conv_id: CONV_ID,
+            group_ids: [trip],
+          },
+          // Hold for extraction so the just-added memory is queryable when the
+          // client refreshes the sidebar on stream close (matches the seed route).
+          { wait: true },
+        )
         .catch((e) => console.error('[chat] ingest failed:', e));
     },
   });
