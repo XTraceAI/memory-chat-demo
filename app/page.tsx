@@ -98,7 +98,7 @@ export default function Home() {
     }
   }, []);
 
-  const { messages, sendMessage, status, setMessages } = useChat({
+  const { messages, sendMessage, status, setMessages, stop } = useChat({
     onFinish: () => {
       // Ingest runs server-side and is awaited before the stream closes, so the
       // new (tagged) memory should be queryable by the time we refresh.
@@ -158,6 +158,7 @@ export default function Home() {
   // and the chat transport pick up the new persona immediately.
   const onPersona = (p: PersonaId) => {
     if (p === persona) return;
+    stop(); // abort any in-flight stream so it doesn't lock input or bleed chunks
     personaRef.current = p;
     contextReqRef.current++; // invalidate any in-flight context preview
     setPersona(p);
@@ -196,6 +197,7 @@ export default function Home() {
 
   const onReset = async () => {
     if (!confirm('Wipe all traveler memories (Alice + Bob). The travel guide stays. Continue?')) return;
+    stop(); // abort any in-flight stream before clearing the thread
     await fetch('/api/memories', { method: 'DELETE' });
     contextReqRef.current++; // invalidate any in-flight context preview
     setContext(null);
