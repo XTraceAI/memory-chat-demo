@@ -1,13 +1,7 @@
 'use client';
 
 import { useChat } from '@ai-sdk/react';
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type FormEvent,
-} from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { PERSONAS, DEFAULT_PERSONA, personaName, type PersonaId } from '@/lib/personas';
 
 type StoredMemory = {
@@ -16,17 +10,20 @@ type StoredMemory = {
   text: string;
   created_at: string;
   score?: number | null;
+  user_id?: string | null;
   group_ids?: string[];
+  app_id?: string | null;
   details?: { status?: string; fact_type?: string } | null;
 };
 
 type ScopeStat = { scope: string; count: number };
 type RecallContext = { prompt: string; scopes: ScopeStat[] } | null;
-type SidebarTab = 'context' | 'memories';
+type ListScope = 'personal' | 'trip' | 'guide';
+type SidebarTab = ListScope | 'context';
 
 export default function Home() {
   const [persona, setPersona] = useState<PersonaId>(DEFAULT_PERSONA);
-  const [tab, setTab] = useState<SidebarTab>('memories');
+  const [tab, setTab] = useState<SidebarTab>('personal');
 
   const [memories, setMemories] = useState<StoredMemory[]>([]);
   const [memoriesLoading, setMemoriesLoading] = useState(false);
@@ -40,16 +37,17 @@ export default function Home() {
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [seeding, setSeeding] = useState(false);
 
-  // Track ids we've already seen so we only highlight true deltas.
+  // Track ids we've already seen so we only highlight true deltas (Personal only).
   const seenIdsRef = useRef<Set<string>>(new Set());
   const isInitialLoadRef = useRef(true);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queryRef = useRef('');
-  // Keep the current persona reachable from stable callbacks (transport, onFinish).
+  // Keep current persona + tab reachable from stable callbacks (onFinish).
   const personaRef = useRef<PersonaId>(persona);
-  // Monotonic request ids: a fetch only writes its result/clears its loading flag
-  // if it's still the latest of its kind. Prevents an in-flight fetch for the old
-  // persona (or an earlier query) from clobbering newer state after it resolves.
+  const tabRef = useRef<SidebarTab>(tab);
+  // Monotonic request ids: a fetch only writes its result / clears its loading
+  // flag if it's still the latest of its kind. Prevents an in-flight fetch for an
+  // old scope/persona/query from clobbering newer state after it resolves.
   const memoriesReqRef = useRef(0);
   const contextReqRef = useRef(0);
 
@@ -59,25 +57,25 @@ export default function Home() {
     isInitialLoadRef.current = true;
   }, []);
 
-  const refreshMemories = useCallback(async (q: string = '') => {
+  const loadScope = useCallback(async (scope: ListScope, q: string) => {
     const reqId = ++memoriesReqRef.current;
     setMemoriesLoading(true);
     try {
-      const p = personaRef.current;
-      const base = `/api/memories?persona=${p}`;
-      const url = q ? `${base}&q=${encodeURIComponent(q)}` : base;
-      const res = await fetch(url, { cache: 'no-store' });
+      const params = new URLSearchParams({ scope, persona: personaRef.current });
+      if (q) params.set('q', q);
+      const res = await fetch(`/api/memories?${params.toString()}`, { cache: 'no-store' });
       const data = await res.json();
-      // Superseded by a newer refresh (debounce / onFinish / persona switch)?
-      // Drop the result so it can't clobber the latest data or highlight diff.
+      // Superseded by a newer load (tab / persona / query switch)? Drop it so it
+      // can't clobber the latest data or the highlight diff.
       if (memoriesReqRef.current !== reqId) return;
       const active: StoredMemory[] = (data.memories ?? []).filter(
         (m: StoredMemory) => m.details?.status !== 'retracted',
       );
       setMemories(active);
 
-      // Highlight "just added" only in list mode — meaningless during search.
-      if (!q) {
+      // Highlight "just added" only for the Personal browse (after a chat turn) —
+      // meaningless during search or on the Trip/Guide tabs.
+      if (scope === 'personal' && !q) {
         const currentIds = new Set(active.map((m) => m.id));
         if (!isInitialLoadRef.current) {
           const justAdded = new Set([...currentIds].filter((id) => !seenIdsRef.current.has(id)));
@@ -89,20 +87,22 @@ export default function Home() {
         }
         seenIdsRef.current = currentIds;
         isInitialLoadRef.current = false;
+      } else {
+        setNewIds(new Set());
       }
     } catch (err) {
-      if (memoriesReqRef.current === reqId) console.error('Failed to fetch memories:', err);
+      if (memoriesReqRef.current === reqId) console.error('Failed to load memories:', err);
     } finally {
-      // Only the latest refresh owns the loading flag (per-handler lifecycle).
       if (memoriesReqRef.current === reqId) setMemoriesLoading(false);
     }
   }, []);
 
   const { messages, sendMessage, status, setMessages, stop } = useChat({
     onFinish: () => {
-      // Ingest runs server-side and is awaited before the stream closes, so the
-      // new (tagged) memory should be queryable by the time we refresh.
-      refreshMemories(queryRef.current);
+      // Ingest is awaited (wait:true) before the stream closes, so the new tagged
+      // memory is queryable. Refresh the active list tab (skip when on Context).
+      const t = tabRef.current;
+      if (t !== 'context') loadScope(t, queryRef.current);
     },
   });
 
@@ -138,11 +138,16 @@ export default function Home() {
   }, [debouncedQuery]);
 
   useEffect(() => {
-    // Deliberate external-system sync: (re)load the memory list on mount and
-    // whenever the debounced search query changes.
+    tabRef.current = tab;
+  }, [tab]);
+
+  // (Re)load the active scope on mount and whenever the tab, persona, or debounced
+  // query changes. Context has no list, so it's skipped here.
+  useEffect(() => {
+    if (tab === 'context') return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    refreshMemories(debouncedQuery);
-  }, [debouncedQuery, refreshMemories]);
+    loadScope(tab, debouncedQuery);
+  }, [tab, debouncedQuery, persona, loadScope]);
 
   useEffect(() => {
     return () => {
@@ -152,10 +157,9 @@ export default function Home() {
 
   const busy = status === 'streaming' || status === 'submitted';
 
-  // Switching traveler resets the thread + context and reloads their memories.
-  // This lives in the event handler (not an effect) so it's a single, explicit
-  // transition rather than a cascade. personaRef updates first so the refetch
-  // and the chat transport pick up the new persona immediately.
+  // Switching traveler is one explicit transition (an event, not an effect):
+  // halt any stream, reset thread + context + search, and land on Personal. The
+  // load effect refetches because `persona` (and maybe `tab`) changed.
   const onPersona = (p: PersonaId) => {
     if (p === persona) return;
     stop(); // abort any in-flight stream so it doesn't lock input or bleed chunks
@@ -167,8 +171,18 @@ export default function Home() {
     setMemories([]); // don't show the previous traveler's memories mid-load
     resetHighlights();
     setSearchQuery('');
-    setTab('memories');
-    refreshMemories(''); // bumps memoriesReqRef → supersedes any in-flight fetch
+    setDebouncedQuery('');
+    setTab('personal');
+  };
+
+  // Clear the visible list when switching scope tabs so the previous scope's rows
+  // don't linger under the new header (the load effect refetches for the new tab).
+  const onTab = (t: SidebarTab) => {
+    if (t !== tab) {
+      setMemories([]);
+      setNewIds(new Set());
+    }
+    setTab(t);
   };
 
   const onSubmit = (e: FormEvent<HTMLFormElement>) => {
@@ -187,7 +201,10 @@ export default function Home() {
     try {
       await fetch('/api/seed', { method: 'POST' });
       resetHighlights();
-      await refreshMemories('');
+      setSearchQuery('');
+      setDebouncedQuery('');
+      setTab('personal');
+      await loadScope('personal', ''); // server data changed without a dep change
     } catch (err) {
       console.error('Seed failed:', err);
     } finally {
@@ -205,7 +222,9 @@ export default function Home() {
     setMemories([]);
     resetHighlights();
     setSearchQuery('');
-    refreshMemories('');
+    setDebouncedQuery('');
+    setTab('personal');
+    await loadScope('personal', '');
   };
 
   return (
@@ -228,13 +247,13 @@ export default function Home() {
         />
         <Sidebar
           tab={tab}
-          onTab={setTab}
+          onTab={onTab}
           persona={persona}
           context={context}
           contextLoading={contextLoading}
           memories={memories}
           loading={memoriesLoading}
-          onRefresh={() => refreshMemories(debouncedQuery)}
+          onRefresh={() => (tab === 'context' ? undefined : loadScope(tab, debouncedQuery))}
           newIds={newIds}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
@@ -432,6 +451,13 @@ function EmptyState({ persona }: { persona: PersonaId }) {
   );
 }
 
+const TABS: { id: SidebarTab; label: string }[] = [
+  { id: 'personal', label: 'Personal' },
+  { id: 'trip', label: 'Trip' },
+  { id: 'guide', label: 'Guide' },
+  { id: 'context', label: 'Context' },
+];
+
 function Sidebar({
   tab,
   onTab,
@@ -462,17 +488,18 @@ function Sidebar({
   return (
     <aside className="flex w-96 flex-shrink-0 flex-col overflow-hidden border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex border-b border-zinc-200 dark:border-zinc-800">
-        <TabButton active={tab === 'context'} onClick={() => onTab('context')}>
-          Context
-        </TabButton>
-        <TabButton active={tab === 'memories'} onClick={() => onTab('memories')}>
-          {personaName(persona)}&apos;s memories
-        </TabButton>
+        {TABS.map((t) => (
+          <TabButton key={t.id} active={tab === t.id} onClick={() => onTab(t.id)}>
+            {t.label}
+          </TabButton>
+        ))}
       </div>
       {tab === 'context' ? (
         <ContextPanel context={context} loading={contextLoading} />
       ) : (
         <MemoryPanel
+          scope={tab}
+          persona={persona}
           memories={memories}
           loading={loading}
           onRefresh={onRefresh}
@@ -499,7 +526,7 @@ function TabButton({
     <button
       onClick={onClick}
       className={
-        'flex-1 px-4 py-2.5 text-xs font-semibold transition ' +
+        'flex-1 px-3 py-2.5 text-xs font-semibold transition ' +
         (active
           ? 'border-b-2 border-zinc-900 text-zinc-900 dark:border-zinc-100 dark:text-zinc-100'
           : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200')
@@ -555,7 +582,27 @@ function ContextPanel({ context, loading }: { context: RecallContext; loading: b
   );
 }
 
+const SCOPE_META: Record<ListScope, { title: (p: PersonaId) => string; placeholder: string; empty: string }> = {
+  personal: {
+    title: (p) => `${personaName(p)}'s memories`,
+    placeholder: 'Search this traveler’s memories…',
+    empty: 'No memories yet. Hit “Seed demo”, or chat — facts you share get extracted here.',
+  },
+  trip: {
+    title: () => 'Trip — shared by everyone',
+    placeholder: 'Search the trip…',
+    empty: 'No shared trip memories yet. Chat about trip plans (dates, hotels, dinners) to tag them here.',
+  },
+  guide: {
+    title: () => 'Travel guide (provider)',
+    placeholder: 'Search the guide…',
+    empty: 'No guide entries yet. Hit “Seed demo” to load the provider knowledge base.',
+  },
+};
+
 function MemoryPanel({
+  scope,
+  persona,
   memories,
   loading,
   onRefresh,
@@ -564,6 +611,8 @@ function MemoryPanel({
   onSearchChange,
   isSearching,
 }: {
+  scope: ListScope;
+  persona: PersonaId;
   memories: StoredMemory[];
   loading: boolean;
   onRefresh: () => void;
@@ -572,6 +621,7 @@ function MemoryPanel({
   onSearchChange: (v: string) => void;
   isSearching: boolean;
 }) {
+  const meta = SCOPE_META[scope];
   const sorted = isSearching
     ? memories
     : [...memories].sort((a, b) => {
@@ -584,10 +634,10 @@ function MemoryPanel({
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       <div className="border-b border-zinc-200 p-4 dark:border-zinc-800">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-1 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold">{isSearching ? 'Search results' : 'Stored memories'}</h2>
-            {!isSearching && newIds.size > 0 && (
+            <h2 className="text-sm font-semibold">{isSearching ? 'Search results' : meta.title(persona)}</h2>
+            {!isSearching && scope === 'personal' && newIds.size > 0 && (
               <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
                 +{newIds.size} new
               </span>
@@ -601,12 +651,19 @@ function MemoryPanel({
             {loading ? '…' : 'refresh'}
           </button>
         </div>
+        <p className="mb-3 text-[11px] text-zinc-400">
+          {scope === 'personal'
+            ? 'Scoped to this traveler (user_id).'
+            : scope === 'trip'
+              ? 'The shared group, across both travelers (group_ids).'
+              : 'The provider knowledge base (app_id) — read by everyone.'}
+        </p>
         <div className="relative">
           <input
             type="search"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search this traveler's memories…"
+            placeholder={meta.placeholder}
             className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 pr-7 text-xs outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-800"
           />
           {searchQuery && (
@@ -625,15 +682,16 @@ function MemoryPanel({
       <div className="flex-1 overflow-y-auto p-4">
         {memories.length === 0 ? (
           <p className="text-xs text-zinc-500">
-            {isSearching
-              ? `No matches for "${searchQuery.trim()}". Try different words.`
-              : 'No memories yet. Hit “Seed demo”, or chat — facts you share get extracted and tagged here.'}
+            {loading
+              ? 'Loading…'
+              : isSearching
+                ? `No matches for "${searchQuery.trim()}". Try different words.`
+                : meta.empty}
           </p>
         ) : (
           <ul className="flex flex-col gap-2">
             {sorted.map((m) => {
-              const isNew = !isSearching && newIds.has(m.id);
-              const isShared = (m.group_ids?.length ?? 0) > 0;
+              const isNew = !isSearching && scope === 'personal' && newIds.has(m.id);
               return (
                 <li
                   key={m.id}
@@ -644,13 +702,25 @@ function MemoryPanel({
                       : 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950')
                   }
                 >
-                  <div className="mb-1 flex items-center gap-2">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
                     <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
                       {m.type}
                     </span>
-                    {isShared && (
+                    {/* Trip tab: who contributed this shared row. */}
+                    {scope === 'trip' && m.user_id && (
+                      <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                        {personaName(m.user_id)}
+                      </span>
+                    )}
+                    {/* Personal tab: flag rows the traveler also shared to the trip. */}
+                    {scope === 'personal' && (m.group_ids?.length ?? 0) > 0 && (
                       <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
                         shared · trip
+                      </span>
+                    )}
+                    {scope === 'guide' && (
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                        guide
                       </span>
                     )}
                     {isSearching && typeof m.score === 'number' && (
