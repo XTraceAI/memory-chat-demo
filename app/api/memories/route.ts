@@ -1,4 +1,4 @@
-import { getMemory, getTripGroupId, toPersona, CONV_ID, PRODUCT_APP_ID } from '@/lib/memory';
+import { getMemory, getTripGroupId, toPersona, CONV_ID, PRODUCT_APP_ID, TRIP_NAMESPACE } from '@/lib/memory';
 import type { Memory } from '@xtraceai/memory';
 
 export const dynamic = 'force-dynamic';
@@ -64,9 +64,9 @@ export async function GET(req: Request) {
   }
 }
 
-/** Wipe both travelers' memories (personal + their trip-group contributions).
- *  The provider KB (a different pseudo-user) is left intact so re-seeding stays
- *  cheap. */
+/** Wipe both travelers' memories (personal facts + their trip-group facts) AND
+ *  the group's learned directives, so a demo restart is truly cold. The provider
+ *  KB (a different pseudo-user) is left intact so re-seeding stays cheap. */
 export async function DELETE() {
   try {
     const client = getMemory().memories;
@@ -77,6 +77,26 @@ export async function DELETE() {
         deleted++;
       }
     }
+
+    // Directives are a separate corpus (not in list/search) — enumerate them via
+    // the tripwire on the demo's tool identifiers, then delete each so the next
+    // "cold" run is genuinely cold.
+    try {
+      const trip = await getTripGroupId();
+      const res = await client.trigger({
+        entities: ['findFlights', 'bookFlight', 'notifyGroup'],
+        group_ids: [trip],
+        namespace: TRIP_NAMESPACE,
+        mode: 'retrieve',
+      });
+      for (const d of res.data ?? []) {
+        await client.delete(d.id).catch(() => {/* tolerate */});
+        deleted++;
+      }
+    } catch (e) {
+      console.error('[memories] directive clear failed:', e);
+    }
+
     return Response.json({ deleted });
   } catch (err) {
     console.error('[memories] delete failed:', err);

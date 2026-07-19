@@ -46,11 +46,23 @@ export {
 /** One shared conversation thread for the trip. */
 export const CONV_ID = process.env.DEMO_CONV_ID ?? 'tokyo-trip-2026';
 
+/**
+ * Namespace the trip's learned *directives* (lessons / procedures) live under.
+ * This is the axis that transfers a learned rule from one traveler to another:
+ * `agentic: true` ingest captures directives here, and `withDirectiveRecall` /
+ * `trigger` read them back by the same namespace — so a rule Alice teaches is
+ * live for Bob without re-teaching. (Directives ignore `group_ids`; the shared
+ * namespace is what makes them cross-actor.)
+ */
+export const TRIP_NAMESPACE = process.env.DEMO_TRIP_NAMESPACE ?? 'trip:tokyo-2026-may';
+
 /** The shared trip group — created on demand, found by name. */
 export const TRIP_GROUP_NAME = 'Tokyo Trip — May 2026';
 export const TRIP_GROUP_PROMPT =
-  'Facts about the shared Tokyo trip in May 2026: dates, flights, hotels, ' +
-  'restaurants, reservations, budget, and group plans for this trip.';
+  'Group-level decisions for the shared Tokyo trip in May 2026 that apply to the whole ' +
+  'party’s itinerary: dates, flight routing (nonstop vs stops), airports, hotels, budget ' +
+  'per person, reservations, and group plans. NOT individual seat choices — a seat is ' +
+  'personal to each traveler.';
 
 /** The product provider's travel knowledge base — read by everyone, written by no chat. */
 export const PRODUCT_APP_ID = 'tripmate-guide';
