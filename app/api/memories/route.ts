@@ -2,6 +2,7 @@ import { getMemory, getTripGroupId, toPersona, CONV_ID, PRODUCT_APP_ID, TRIP_NAM
 import type { Memory } from '@xtraceai/memory';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60; // reset deletes item-by-item; don't let Vercel kill it early
 
 type Scope = 'personal' | 'trip' | 'guide';
 function toScope(v: string | null): Scope {
@@ -71,27 +72,37 @@ export async function DELETE() {
   try {
     const client = getMemory().memories;
     let deleted = 0;
+
+    // Collect ids first, THEN delete — deleting while paginating can shift the
+    // cursor and skip rows. `list` auto-paginates, so this covers all of them.
     for (const user of ['alice', 'bob']) {
-      for await (const m of client.list({ user_id: user, limit: 100 })) {
-        await client.delete(m.id).catch(() => {/* tolerate already-deleted */});
+      const ids: string[] = [];
+      for await (const m of client.list({ user_id: user, limit: 100 })) ids.push(m.id);
+      for (const id of ids) {
+        await client.delete(id).catch(() => {/* tolerate already-deleted */});
         deleted++;
       }
     }
 
     // Directives are a separate corpus (not in list/search) — enumerate them via
     // the tripwire on the demo's tool identifiers, then delete each so the next
-    // "cold" run is genuinely cold.
+    // "cold" run is genuinely cold. A single trigger can cap its results, so loop
+    // until the tripwire comes back empty.
     try {
       const trip = await getTripGroupId();
-      const res = await client.trigger({
-        entities: ['findFlights', 'bookFlight', 'notifyGroup'],
-        group_ids: [trip],
-        namespace: TRIP_NAMESPACE,
-        mode: 'retrieve',
-      });
-      for (const d of res.data ?? []) {
-        await client.delete(d.id).catch(() => {/* tolerate */});
-        deleted++;
+      for (let pass = 0; pass < 12; pass++) {
+        const res = await client.trigger({
+          entities: ['findFlights', 'bookFlight', 'notifyGroup'],
+          group_ids: [trip],
+          namespace: TRIP_NAMESPACE,
+          mode: 'retrieve',
+        });
+        const rows = res.data ?? [];
+        if (rows.length === 0) break;
+        for (const d of rows) {
+          await client.delete(d.id).catch(() => {/* tolerate */});
+          deleted++;
+        }
       }
     } catch (e) {
       console.error('[memories] directive clear failed:', e);

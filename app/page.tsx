@@ -131,11 +131,15 @@ export default function Home() {
     stop();
     rulesReqRef.current++;
     threadsRef.current = {}; // drop both travelers' stashed threads
-    await fetch('/api/memories', { method: 'DELETE' });
-    setMessages([]);
+    setMessages([]); // clear the UI immediately, before the (slower) server wipe
     setRules([]);
     setPreferences({});
-    await fetchRules();
+    try {
+      await fetch('/api/memories', { method: 'DELETE' });
+    } catch (e) {
+      console.error('Reset failed:', e);
+    }
+    await fetchRules(); // reflect the true server state (empty if the wipe worked)
   };
 
   return (
