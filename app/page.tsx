@@ -369,6 +369,7 @@ type UIPart = {
   input?: unknown;
   output?: unknown;
   errorText?: string;
+  data?: unknown;
 };
 
 type FlightRow = {
@@ -412,6 +413,9 @@ function MessageBubble({ message, persona }: { message: ChatMessage; persona: Pe
             </div>
           ) : null;
         }
+        if (part.type === 'data-hook') {
+          return <HookLine key={i} data={part.data} />;
+        }
         if (part.type === 'dynamic-tool' || part.type.startsWith('tool-')) {
           const name = part.type === 'dynamic-tool' ? part.toolName ?? 'tool' : part.type.slice(5);
           return <ToolStepCard key={i} name={name} part={part} />;
@@ -448,6 +452,39 @@ function ruleText(md: string): string {
   s = s.replace(/^#+\s.*$/gm, '').replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim();
   // Keep the human sentence; drop any trailing numbered "1. Call findFlights…" steps.
   return s.split(/\s\d+\.\s/)[0].trim();
+}
+
+/** The pre-tool-call hook trace — procedural memory recalled at the moment the
+ *  agent is about to act, before it picks the tool's arguments. */
+function HookLine({ data }: { data: unknown }) {
+  const d = (data ?? {}) as { tool?: string; count?: number; rules?: string[] };
+  const tool = d.tool ?? 'tool';
+  const count = d.count ?? 0;
+  const rules = d.rules ?? [];
+  return (
+    <div className="w-full max-w-[88%] rounded-lg border border-violet-200 bg-violet-50/60 px-3 py-2 dark:border-violet-900/50 dark:bg-violet-950/20">
+      <div className="flex items-center gap-1.5 text-[12px] font-medium">
+        <Icon name="spark" className="h-3.5 w-3.5 shrink-0 text-violet-500" />
+        {count > 0 ? (
+          <span className="text-violet-700 dark:text-violet-300">
+            hook fired before <span className="font-mono">{tool}()</span> · {count} directive
+            {count > 1 ? 's' : ''}
+          </span>
+        ) : (
+          <span className="text-zinc-400">
+            checked the team playbook before <span className="font-mono">{tool}()</span> · no rules yet
+          </span>
+        )}
+      </div>
+      {count > 0 && rules.length > 0 && (
+        <ul className="mt-1 flex flex-col gap-0.5 pl-5 text-[11px] text-violet-800 dark:text-violet-300">
+          {rules.map((r, i) => (
+            <li key={i}>• {r}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function ToolStepCard({ name, part }: { name: string; part: UIPart }) {
